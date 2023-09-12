@@ -182,6 +182,8 @@ def motion_detect_webcam(
                 for frame in recorded_frames:
                     video_writer.write(frame)
 
+                video_writer.release()
+
                 print("saved recording.")
 
 
@@ -189,8 +191,6 @@ def motion_detect_webcam(
                 recorded_frames = recorded_frames[-prefix_motion_frames:]
         except KeyboardInterrupt:
             break
-
-    video_writer.release()
 
 
 
