@@ -1,17 +1,21 @@
 import cv2
 import time
-import cv2
+from datetime import datetime
 from cv2.typing import MatLike
-from typing import Tuple
-
-#TODO clean this file up, do what the instructing comments say to do.
-#make each 'recorded_frame' input a pandas dataframe with both a frame and a timestamp entry. Append datetime to video when output.
-#maybe also record when motion is deteceted.
-
-##credits to https://www.geeksforgeeks.org/webcam-motion-detector-python/ for logic regarding motion detection
-
+from typing import Tuple,TypedDict
+from numpy.typing import NDArray
 
 Rect = Tuple[int,int,int,int]
+
+class Timestamped_Frame(TypedDict):
+    """Args:
+        frame: (NDArray)
+
+        timestamp: (float | int) - given as epoch time
+    """
+    frame:NDArray
+    timestamp:float | int
+
 
 
 def _frames_to_seconds(frame_count:int,fps:int) -> float:
@@ -19,8 +23,6 @@ def _frames_to_seconds(frame_count:int,fps:int) -> float:
 
 def _seconds_to_frames(seconds : float | int,fps:int) -> int:
     return int(fps * seconds)
-
-
 
 
 def get_movement_between_frames(
@@ -54,12 +56,6 @@ def get_movement_between_frames(
         
 
 
-
-
-
-
-
-
 def motion_detect_webcam(
         show_bounding_rects:bool = True,
         prefix_motion_seconds:int = 5,
@@ -85,7 +81,7 @@ def motion_detect_webcam(
     last_motion_detected_epoch : int | None = None
     motion_is_detected : bool = False
     recording : bool = False
-    recorded_frames : list[MatLike]= []
+    recorded_frames : list[Timestamped_Frame]= []
     last_sample_frame = None
 
     static_background = None #for assignment in first loop itteration
@@ -138,7 +134,10 @@ def motion_detect_webcam(
 
             ## record frames if necessary ##
             was_recording = recording
-            recorded_frames.append(frame)
+            recorded_frames.append({
+                "frame":frame,
+                "timestamp":frame_timestamp,
+            })
 
             if not recording and not motion_is_detected:
                 #delete first frame from recorded frames if more than prefix frames are recorded.
@@ -170,6 +169,7 @@ def motion_detect_webcam(
                             static_background = gs_frame
                     
                     last_sample_frame = gs_frame
+                    frame_counter = 0 #reset because if left running for a long time may cause overflow
                     
 
 
@@ -179,7 +179,20 @@ def motion_detect_webcam(
                 print("saving recording.",f"{len(recorded_frames)} frames recorded.")
                 
                 video_writer = cv2.VideoWriter(filename=f"gen\\{time.time()}.avi",fourcc=fourcc,fps=fps,frameSize=(d_w,d_h))
-                for frame in recorded_frames:
+                for timestamp_frame in recorded_frames:
+                    frame = timestamp_frame["frame"]
+                    timestamp = timestamp_frame["timestamp"]
+                    
+                    frame = cv2.putText(frame,
+                            text=datetime.fromtimestamp(timestamp).strftime("%d/%m/%Y - %H:%M:%S %p %Z"),
+                            org=(30,30),
+                            fontFace=cv2.FONT_HERSHEY_PLAIN,
+                            fontScale=1.5,
+                            color=(255,0,0),
+                            thickness=2,
+                        )
+
+
                     video_writer.write(frame)
 
                 video_writer.release()
