@@ -4,17 +4,23 @@ from datetime import datetime
 from cv2.typing import MatLike
 from typing import Tuple,TypedDict
 from numpy.typing import NDArray
+from threading import Thread,Lock
+
+
 
 Rect = Tuple[int,int,int,int]
 
-class Timestamped_Frame(TypedDict):
+class Meta_Frame(TypedDict):
     """Args:
         frame: (NDArray)
 
         timestamp: (float | int) - given as epoch time
+
+        belongs_to: (int) - the id of the video the frame belongs to (for the purpose of writing videos)
     """
     frame:NDArray
     timestamp:float | int
+    belongs_to:int
 
 
 
@@ -38,10 +44,10 @@ def get_movement_between_frames(
         # current frame is greater than 30 it will show white color(255)
         thresh_frame = cv2.threshold(difference_frame, difference_threshold, 255, cv2.THRESH_BINARY)[1]
         thresh_frame = cv2.dilate(thresh_frame, None, iterations = 2)
-    
+
         # Finding contour of moving object
         cnts,_ = cv2.findContours(thresh_frame.copy(), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-
+    
         movement_bounding_rects = []
 
         for contour in cnts:
@@ -61,7 +67,7 @@ def motion_detect_webcam(
         prefix_motion_seconds:int = 5,
         suffix_motion_seconds:int = 5,
         show:bool = False,
-        refresh_background_rate_seconds:int = 10, # this is the time (in seconds) between which frames are checked to see if a 'new background image' has occured. E.g, motion has stopped but the frame may now look different than it did orignally.
+        refresh_background_rate_seconds:int = 5, # this is the time (in seconds) between which frames are checked to see if a 'new background image' has occured. E.g, motion has stopped but the frame may now look different than it did orignally.
     ):
     cap = cv2.VideoCapture(0)
 
@@ -81,12 +87,22 @@ def motion_detect_webcam(
     last_motion_detected_epoch : int | None = None
     motion_is_detected : bool = False
     recording : bool = False
-    recorded_frames : list[Timestamped_Frame]= []
-    last_sample_frame = None
+    
+    prefice_buffer_frames : list[Meta_Frame] = []
+    frames_to_write : list[Meta_Frame] = []
 
+    last_sample_frame = None
     static_background = None #for assignment in first loop itteration
 
     frame_counter = 0
+    current_video_index = 0
+    end_video_indexes : list[int] = []
+
+    ## threads
+
+    video_storage_thread = Thread(target=video_store_handler,args=(frames_to_write,end_video_indexes,fps,((d_w,d_h))))
+    video_storage_thread.start()
+
 
     while cap.isOpened():
         try:
@@ -134,15 +150,18 @@ def motion_detect_webcam(
 
             ## record frames if necessary ##
             was_recording = recording
-            recorded_frames.append({
+            
+
+            meta_frame = {
                 "frame":frame,
                 "timestamp":frame_timestamp,
-            })
+                "belongs_to":current_video_index,
+            }
+
 
             if not recording and not motion_is_detected:
                 #delete first frame from recorded frames if more than prefix frames are recorded.
-                if len(recorded_frames) > prefix_motion_frames:
-                    recorded_frames = recorded_frames[1:]
+                pass
 
             elif not recording and motion_is_detected:
                 print("motion has been detected.")
@@ -173,40 +192,87 @@ def motion_detect_webcam(
                     
 
 
-            
-            if was_recording and not recording:
-                #recording has ceased. submit save recording
-                print("saving recording.",f"{len(recorded_frames)} frames recorded.")
+            ## pass frames to video store handler
+            if recording:
+                if not was_recording:
+                    #started recording on this frame
+                    frames_to_write += prefice_buffer_frames
+                frames_to_write.append(meta_frame)
                 
-                video_writer = cv2.VideoWriter(filename=f"gen\\{time.time()}.avi",fourcc=fourcc,fps=fps,frameSize=(d_w,d_h))
-                for timestamp_frame in recorded_frames:
-                    frame = timestamp_frame["frame"]
-                    timestamp = timestamp_frame["timestamp"]
-                    
-                    frame = cv2.putText(frame,
-                            text=datetime.fromtimestamp(timestamp).strftime("%d/%m/%Y - %H:%M:%S %p %Z"),
-                            org=(30,30),
-                            fontFace=cv2.FONT_HERSHEY_PLAIN,
-                            fontScale=1.5,
-                            color=(255,0,0),
-                            thickness=2,
-                        )
+            elif was_recording and not recording:
+                #stopped recording on this frame
+                end_video_indexes.append(current_video_index)
+                current_video_index += 1
 
 
-                    video_writer.write(frame)
+            ## update prefice buffer frames
+            prefice_buffer_frames.append(meta_frame)
+            if len(prefice_buffer_frames) > prefix_motion_frames:
+                    del prefice_buffer_frames[0]
 
-                video_writer.release()
-
-                print("saved recording.")
-
-
-                #wipe recorded frames to only contain the frames within the specified time to prefix motion.
-                recorded_frames = recorded_frames[-prefix_motion_frames:]
+            print(datetime.now().strftime("%H:%M:%S"))
+                
         except KeyboardInterrupt:
             break
 
 
 
+#this function is intended to be ran asynchronously and read from 'frames_to_write' which should be passed by reference and appended to in an external thread.
+def video_store_handler(frames_to_write:list[Meta_Frame],ended_video_indexes:list[int],fps:int, video_dimensions:Tuple[int,int]):    
+    save_delay = 5 # delay in seconds to save video 
+    
+    ## initialise video writer
+    fourcc = cv2.VideoWriter.fourcc(*"XVID") # avi codec. (hard code for now, maybe support other codecs in future)
+    vw = cv2.VideoWriter(filename=f"gen\\del_{time.time()}.avi",fourcc=fourcc,fps=fps,frameSize=video_dimensions)
+
+    last_written_to_video_index : int | None = None
+    last_frame_write_time : float | None = None
+
+
+    while True:
+        if last_written_to_video_index in ended_video_indexes:
+            print("saving the last video. starting a new one.")
+            ended_video_indexes.remove(last_written_to_video_index)
+            #save video and start a new one
+            vw.release()
+            vw = cv2.VideoWriter(filename=f"gen\\del_{time.time()}_{last_written_to_video_index + 1}.avi",fourcc=fourcc,fps=fps,frameSize=video_dimensions)
+
+        if len(frames_to_write) == 0:
+            #there are no frames that need writing
+            continue
+
+        #fetch the next frame
+        META_FRAME_TO_WRITE = frames_to_write[0]
+        #delete next frame from memory
+        del frames_to_write[0]
+
+
+        ## append timestamp text to frame
+        frame_to_write = cv2.putText(META_FRAME_TO_WRITE["frame"],
+                                        text=datetime.fromtimestamp(META_FRAME_TO_WRITE["timestamp"]).strftime("%d/%m/%Y - %H:%M:%S %p %Z"),
+                                        org=(30,30),
+                                        fontFace=cv2.FONT_HERSHEY_PLAIN,
+                                        fontScale=1.5,
+                                        color=(255,0,0),
+                                        thickness=2,
+                                    )
+
+
+
+        vw.write(frame_to_write)
+        last_written_to_video_index = META_FRAME_TO_WRITE["belongs_to"]
+
+        #remove the 'belongs_to' part. It is obeselete.
+
+
+
+
+
+
+
+
+
+
 if __name__ == "__main__":
-    motion_detect_webcam(show=True)
+    motion_detect_webcam(show=False)
     
